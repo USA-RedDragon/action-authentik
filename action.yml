@@ -44,7 +44,7 @@ runs:
           -H "Content-Type: application/x-www-form-urlencoded" \
           -d "grant_type=client_credentials" \
           -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-          -d "client_id=${{ secrets.client-id }}" \
+          -d "client_id=${{ inputs.client-id }}" \
           -d "client_assertion=${{ steps.github-token.outputs.token }}" \
           ${{ inputs.authentik-url }}/application/o/token/ | jq -r '.access_token')
         echo "token=${IDTOKEN}" >> $GITHUB_OUTPUT
