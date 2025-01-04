@@ -1,0 +1,50 @@
+name: Authenticate to Authentik
+description: 'Authenticate to an Authentik instance using OAuth2'
+
+inputs:
+  authentik-url:
+    description: 'The URL of the Authentik instance'
+    required: true
+  client-id:
+    description: 'The client ID of the Authentik OAuth2 client'
+    required: true
+outputs:
+  token:
+    description: 'The OAuth token'
+    value: ${{ steps.authentik-token.outputs.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: GitHub Token Info
+      uses: actions/github-script@v6
+      id: github-token-info
+      with:
+        script: |
+          const token = process.env['ACTIONS_RUNTIME_TOKEN']
+          const runtimeUrl = process.env['ACTIONS_ID_TOKEN_REQUEST_URL']
+          core.setOutput('token', token.trim())
+          core.setOutput('token-url', runtimeUrl.trim())
+    - name: GitHub Token
+      id: github-token
+      shell: bash
+      run: |
+        IDTOKEN=$(curl -fSsL \
+          -H "Authorization: bearer ${{steps.github-token-info.outputs.token}}" \
+          -H "Accept: application/json; api-version=2.0" \
+          -H "Content-Type: application/json" \
+          ${{steps.github-token-info.outputs.token-url}} \
+          -d "{}" | jq -r '.value')
+        echo "token=${IDTOKEN}" >> $GITHUB_OUTPUT
+    - name: Authentik Token
+      id: authentik-token
+      shell: bash
+      run: |
+        IDTOKEN=$(curl -fSsL \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "grant_type=client_credentials" \
+          -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+          -d "client_id=${{ secrets.client-id }}" \
+          -d "client_assertion=${{ steps.github-token.outputs.token }}" \
+          ${{ inputs.authentik-url }}/application/o/token/ | jq -r '.access_token')
+        echo "token=${IDTOKEN}" >> $GITHUB_OUTPUT
