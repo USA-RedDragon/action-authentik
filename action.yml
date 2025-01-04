@@ -8,6 +8,9 @@ inputs:
   client-id:
     description: 'The client ID of the Authentik OAuth2 client'
     required: true
+  scope:
+    description: 'The scope to request'
+    default: ''
 outputs:
   token:
     description: 'The OAuth token'
@@ -45,6 +48,7 @@ runs:
           -d "grant_type=client_credentials" \
           -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
           -d "client_id=${{ inputs.client-id }}" \
+          -d "scope=${{ inputs.scope }}" \
           -d "client_assertion=${{ steps.github-token.outputs.token }}" \
           ${{ inputs.authentik-url }}/application/o/token/ | jq -r '.access_token')
         echo "token=${IDTOKEN}" >> $GITHUB_OUTPUT
