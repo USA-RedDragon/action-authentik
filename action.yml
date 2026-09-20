@@ -47,15 +47,31 @@ runs:
           exit 1
         fi
 
+        json_string_field() {
+          sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\\1/p"
+        }
+
+        uri_encode() {
+          local s=$1 out= i c
+          for (( i = 0; i < ${#s}; i++ )); do
+            c=${s:i:1}
+            case $c in
+              [a-zA-Z0-9.~_-]) out=$out$c ;;
+              *) out=$out$(printf '%%%02X' "'$c") ;;
+            esac
+          done
+          printf '%s' "$out"
+        }
+
         request_url="$ACTIONS_ID_TOKEN_REQUEST_URL"
         if [ -n "$AUDIENCE" ]; then
-          request_url="${request_url}&audience=$(jq -rn --arg a "$AUDIENCE" '$a|@uri')"
+          request_url="${request_url}&audience=$(uri_encode "$AUDIENCE")"
         fi
 
         github_jwt="$(curl -fsSL \
           -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
           -H "Accept: application/json; api-version=2.0" \
-          "$request_url" | jq -r '.value')"
+          "$request_url" | json_string_field value)"
         if [ -z "$github_jwt" ] || [ "$github_jwt" = "null" ]; then
           echo "::error::GitHub did not return an OIDC token"
           exit 1
@@ -71,15 +87,21 @@ runs:
           --data-urlencode "client_assertion=${github_jwt}" \
           "${AUTHENTIK_URL%/}/application/o/token/")"
 
-        token="$(printf '%s' "$response" | jq -r --arg t "$TOKEN_TYPE" '.[$t] // empty')"
+        token="$(printf '%s' "$response" | json_string_field "$TOKEN_TYPE")"
         if [ -z "$token" ]; then
           echo "::error::Authentik returned no ${TOKEN_TYPE}. Check that the provider allows client_credentials and federates the GitHub Actions source."
-          printf '%s' "$response" | jq -r 'keys | "returned keys: \(.)"' >&2 || true
+          printf 'returned keys: %s\n' "$(printf '%s' "$response" \
+            | grep -oE '"[A-Za-z0-9_]+"[[:space:]]*:' | tr -d '":' | paste -sd, -)" >&2 || true
           exit 1
         fi
         echo "::add-mask::$token"
 
-        alg="$(printf '%s' "$token" | cut -d. -f1 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r '.alg // "unknown"')"
+        header="$(printf '%s' "$token" | cut -d. -f1 | tr '_-' '/+')"
+        case $(( ${#header} % 4 )) in
+          2) header="$header==" ;;
+          3) header="$header=" ;;
+        esac
+        alg="$(printf '%s' "$header" | base64 -d 2>/dev/null | json_string_field alg)"
         if [ "$alg" = "HS256" ]; then
           echo "::warning::Authentik signed this token HS256, which means no Signing Key is set on the provider. Consumers that verify via JWKS (MinIO, for example) will reject it."
         fi
