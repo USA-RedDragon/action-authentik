@@ -9,8 +9,14 @@ inputs:
     description: 'The client ID of the Authentik OAuth2 client'
     required: true
   scope:
-    description: 'The scope to request'
+    description: 'The scope to request. Include "profile" if the consumer keys policy on preferred_username'
     default: ''
+  audience:
+    description: 'Audience for the GitHub OIDC token. Defaults to the repository owner URL'
+    default: ''
+  token-type:
+    description: 'Which token to return: access_token or id_token'
+    default: 'access_token'
 outputs:
   token:
     description: 'The OAuth token'
@@ -19,36 +25,63 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: GitHub Token Info
-      uses: actions/github-script@v6
-      id: github-token-info
-      with:
-        script: |
-          const token = process.env['ACTIONS_RUNTIME_TOKEN']
-          const runtimeUrl = process.env['ACTIONS_ID_TOKEN_REQUEST_URL']
-          core.setOutput('token', token.trim())
-          core.setOutput('token-url', runtimeUrl.trim())
-    - name: GitHub Token
-      id: github-token
-      shell: bash
-      run: |
-        IDTOKEN=$(curl -fSsL \
-          -H "Authorization: bearer ${{steps.github-token-info.outputs.token}}" \
-          -H "Accept: application/json; api-version=2.0" \
-          -H "Content-Type: application/json" \
-          ${{steps.github-token-info.outputs.token-url}} \
-          -d "{}" | jq -r '.value')
-        echo "token=${IDTOKEN}" >> $GITHUB_OUTPUT
-    - name: Authentik Token
+    - name: Exchange the GitHub OIDC token at Authentik
       id: authentik-token
       shell: bash
+      env:
+        AUTHENTIK_URL: ${{ inputs.authentik-url }}
+        CLIENT_ID: ${{ inputs.client-id }}
+        SCOPE: ${{ inputs.scope }}
+        AUDIENCE: ${{ inputs.audience }}
+        TOKEN_TYPE: ${{ inputs.token-type }}
       run: |
-        IDTOKEN=$(curl -fSsL \
+        set -euo pipefail
+
+        case "$TOKEN_TYPE" in
+          access_token|id_token) ;;
+          *) echo "::error::token-type must be access_token or id_token, got '$TOKEN_TYPE'"; exit 1 ;;
+        esac
+
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::error::No GitHub OIDC token available. The job needs 'permissions: id-token: write'."
+          exit 1
+        fi
+
+        request_url="$ACTIONS_ID_TOKEN_REQUEST_URL"
+        if [ -n "$AUDIENCE" ]; then
+          request_url="${request_url}&audience=$(jq -rn --arg a "$AUDIENCE" '$a|@uri')"
+        fi
+
+        github_jwt="$(curl -fsSL \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          -H "Accept: application/json; api-version=2.0" \
+          "$request_url" | jq -r '.value')"
+        if [ -z "$github_jwt" ] || [ "$github_jwt" = "null" ]; then
+          echo "::error::GitHub did not return an OIDC token"
+          exit 1
+        fi
+        echo "::add-mask::$github_jwt"
+
+        response="$(curl -fsSL \
           -H "Content-Type: application/x-www-form-urlencoded" \
           -d "grant_type=client_credentials" \
           -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-          -d "client_id=${{ inputs.client-id }}" \
-          -d "scope=${{ inputs.scope }}" \
-          -d "client_assertion=${{ steps.github-token.outputs.token }}" \
-          ${{ inputs.authentik-url }}/application/o/token/ | jq -r '.access_token')
-        echo "token=${IDTOKEN}" >> $GITHUB_OUTPUT
+          --data-urlencode "client_id=${CLIENT_ID}" \
+          --data-urlencode "scope=${SCOPE}" \
+          --data-urlencode "client_assertion=${github_jwt}" \
+          "${AUTHENTIK_URL%/}/application/o/token/")"
+
+        token="$(printf '%s' "$response" | jq -r --arg t "$TOKEN_TYPE" '.[$t] // empty')"
+        if [ -z "$token" ]; then
+          echo "::error::Authentik returned no ${TOKEN_TYPE}. Check that the provider allows client_credentials and federates the GitHub Actions source."
+          printf '%s' "$response" | jq -r 'keys | "returned keys: \(.)"' >&2 || true
+          exit 1
+        fi
+        echo "::add-mask::$token"
+
+        alg="$(printf '%s' "$token" | cut -d. -f1 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r '.alg // "unknown"')"
+        if [ "$alg" = "HS256" ]; then
+          echo "::warning::Authentik signed this token HS256, which means no Signing Key is set on the provider. Consumers that verify via JWKS (MinIO, for example) will reject it."
+        fi
+
+        echo "token=${token}" >> "$GITHUB_OUTPUT"
